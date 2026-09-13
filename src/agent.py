@@ -7,7 +7,8 @@ from langchain_groq import ChatGroq
 from langchain_core.tools import tool
 from langchain.agents import create_agent
 from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type
-from groq import RateLimitError
+from groq import RateLimitError, BadRequestError
+from langgraph.errors import GraphRecursionError
 
 from embeddings import load_embedding_model, get_chroma_collection, query_collection
 from retrieval import get_cohere_client, rerank_results
@@ -25,9 +26,10 @@ tavily_client = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
 
 @tool
 def search_documents(query: str) -> str:
-    """Search the Infosys annual report for relevant information using semantic search and reranking.
-    Call this ONLY ONCE per distinct topic. Use this tool to answer questions about Infosys's financials,
-    business segments, strategy, or operations based on their official annual report."""
+    """Search the Infosys FY2024-25 annual report for relevant information using semantic search
+    and reranking. This document contains FY2024-25 figures and one prior-year (FY2023-24) comparison
+    only - it does NOT contain data for years before FY2023-24. Use this tool for questions about
+    Infosys's recent financials, business segments, strategy, or operations."""
     results = query_collection(query, chroma_collection, embed_model, n_results=10)
     documents = results["documents"][0]
 
@@ -51,8 +53,10 @@ def analyze_text_sentiment(text: str) -> str:
 
 @tool
 def web_search(query: str) -> str:
-    """Search the live web for current information not available in the annual report,
-    such as recent news, stock price, or events after the report's publication date."""
+    """Search the live web for current information not available in the annual report -
+    such as recent news, current stock price, historical data older than FY2023-24, or events
+    after the report's publication date. Use this as a fallback when search_documents doesn't
+    have what's needed."""
     response = tavily_client.search(query=query)
     output = ""
     for result in response["results"][:2]:
@@ -62,9 +66,25 @@ def web_search(query: str) -> str:
 
 SYSTEM_PROMPT = """You are a financial research assistant with access to exactly three tools:
 search_documents, analyze_text_sentiment, and web_search. Only call these exact tools, never invent
-other tools. Call search_documents AT MOST ONCE per question unless the user asks about a completely
-different topic. After getting search results, use analyze_text_sentiment on that text if sentiment is
-relevant, then immediately give your final answer. Do not repeat the same tool call. Be concise."""
+other tools.
+
+Tool-calling rules:
+- NEVER call the same tool with the same or near-identical query more than once.
+- For multi-part questions, you may call a tool multiple times with genuinely different queries,
+  but limit yourself to AT MOST 3 tool calls total per question.
+- If a question requires more than 3 distinct pieces of information (e.g. 4+ years of data),
+  do NOT attempt it in full. Instead, answer for as many parts as you reasonably can within 3 tool
+  calls, and tell the user to ask about fewer items at a time for the rest.
+- search_documents only covers FY2024-25 and FY2023-24. For anything outside that range, or for
+  current/live information, use web_search instead.
+- Use analyze_text_sentiment when the tone of financial commentary is relevant.
+- NEVER state a specific number, statistic, or fact unless it appears explicitly in a tool's output.
+  If a tool doesn't provide data for part of the question, say so directly instead of guessing or
+  estimating.
+- When reporting financial figures, always double-check that the currency unit you state (₹ crore,
+  $ billion, etc.) actually matches the number you are reporting - do not mix a numeric value from
+  one currency with a unit label from another.
+- Be concise in your final answer."""
 
 llm = ChatGroq(model="openai/gpt-oss-120b", api_key=os.getenv("GROQ_API_KEY"))
 
@@ -83,7 +103,7 @@ agent = create_agent(
 def _invoke_agent_with_retry(question):
     return agent.invoke(
         {"messages": [("user", question)]},
-        config={"recursion_limit": 10}
+        config={"recursion_limit": 15}
     )
 
 
@@ -93,9 +113,20 @@ def run_agent_query(question: str) -> str:
     and returns just the final answer text. This is what the Streamlit frontend
     will call later.
     """
-    response = _invoke_agent_with_retry(question)
-    final_message = response["messages"][-1]
-    return final_message.content
+    try:
+        response = _invoke_agent_with_retry(question)
+        final_message = response["messages"][-1]
+        return final_message.content
+    except GraphRecursionError:
+        return ("I wasn't able to fully answer this within my step limit. This usually happens "
+                "with questions needing many distinct facts at once - try asking about fewer "
+                "items (e.g. one or two years/metrics) per question.")
+    except RateLimitError:
+        return "I'm currently rate-limited by the LLM provider. Please wait a moment and try again."
+    except BadRequestError:
+        return ("I ran into trouble processing this question, likely because it required too many "
+                "steps to research fully. Please try breaking it into smaller, more specific "
+                "questions (e.g. one year or metric at a time).")
 
 
 if __name__ == "__main__":
