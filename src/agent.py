@@ -80,18 +80,32 @@ agent = create_agent(
     wait=wait_exponential(multiplier=1, min=2, max=20),
     stop=stop_after_attempt(5)
 )
-def invoke_agent_with_retry(question):
+def _invoke_agent_with_retry(question):
     return agent.invoke(
         {"messages": [("user", question)]},
         config={"recursion_limit": 10}
     )
 
 
+def run_agent_query(question: str) -> str:
+    """
+    Public entry point: takes a plain-text question, runs it through the agent,
+    and returns just the final answer text. This is what the Streamlit frontend
+    will call later.
+    """
+    response = _invoke_agent_with_retry(question)
+    final_message = response["messages"][-1]
+    return final_message.content
+
+
 if __name__ == "__main__":
-    question = "What is Infosys's current stock price and recent news, and how does that compare to what they reported in their annual report?"
+    print("=== FinSight Agent (type 'quit' to exit) ===\n")
 
-    response = invoke_agent_with_retry(question)
+    while True:
+        question = input("Ask a question about Infosys: ")
+        if question.strip().lower() in ("quit", "exit"):
+            break
 
-    for message in response["messages"]:
-        print(f"\n[{message.type}]")
-        print(message.content)
+        answer = run_agent_query(question)
+        print(f"\n{answer}\n")
+        print("-" * 60)
