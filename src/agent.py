@@ -26,8 +26,8 @@ tavily_client = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
 @tool
 def search_documents(query: str) -> str:
     """Search the Infosys annual report for relevant information using semantic search and reranking.
-    Use this tool to answer questions about Infosys's financials, business segments, strategy, or operations
-    based on their official annual report."""
+    Call this ONLY ONCE per distinct topic. Use this tool to answer questions about Infosys's financials,
+    business segments, strategy, or operations based on their official annual report."""
     results = query_collection(query, chroma_collection, embed_model, n_results=10)
     documents = results["documents"][0]
 
@@ -35,7 +35,7 @@ def search_documents(query: str) -> str:
 
     output = ""
     for i, result in enumerate(reranked):
-        doc_text = documents[result.index][:500]
+        doc_text = documents[result.index][:400]
         output += f"\n[Result {i+1}]\n{doc_text}\n"
 
     return output
@@ -55,14 +55,24 @@ def web_search(query: str) -> str:
     such as recent news, stock price, or events after the report's publication date."""
     response = tavily_client.search(query=query)
     output = ""
-    for result in response["results"][:3]:
-        output += f"\n{result['title']}\n{result['content'][:300]}\nSource: {result['url']}\n"
+    for result in response["results"][:2]:
+        output += f"\n{result['title']}\n{result['content'][:200]}\n"
     return output
 
 
+SYSTEM_PROMPT = """You are a financial research assistant with access to exactly three tools:
+search_documents, analyze_text_sentiment, and web_search. Only call these exact tools, never invent
+other tools. Call search_documents AT MOST ONCE per question unless the user asks about a completely
+different topic. After getting search results, use analyze_text_sentiment on that text if sentiment is
+relevant, then immediately give your final answer. Do not repeat the same tool call. Be concise."""
+
 llm = ChatGroq(model="openai/gpt-oss-120b", api_key=os.getenv("GROQ_API_KEY"))
 
-agent = create_agent(llm, tools=[search_documents, analyze_text_sentiment, web_search])
+agent = create_agent(
+    llm,
+    tools=[search_documents, analyze_text_sentiment, web_search],
+    system_prompt=SYSTEM_PROMPT
+)
 
 
 @retry(
@@ -71,7 +81,10 @@ agent = create_agent(llm, tools=[search_documents, analyze_text_sentiment, web_s
     stop=stop_after_attempt(5)
 )
 def invoke_agent_with_retry(question):
-    return agent.invoke({"messages": [("user", question)]})
+    return agent.invoke(
+        {"messages": [("user", question)]},
+        config={"recursion_limit": 10}
+    )
 
 
 if __name__ == "__main__":
