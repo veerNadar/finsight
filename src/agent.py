@@ -88,7 +88,7 @@ def invoke_agent_with_retry(question):
 
 
 if __name__ == "__main__":
-    question = "What did Infosys say about revenue growth, and what's the sentiment around it?"
+    question = "What is Infosys's current stock price and recent news, and how does that compare to what they reported in their annual report?"
 
     response = invoke_agent_with_retry(question)
 
