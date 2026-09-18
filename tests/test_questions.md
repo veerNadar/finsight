@@ -45,3 +45,47 @@ question complexity. This points to openai/gpt-oss-120b's tool-calling reliabili
 as the dominant limiting factor, not prompt engineering or question difficulty. Documented
 as a known model characteristic; graceful degradation implemented rather than chasing a
 100% fix via prompting alone.
+
+## RAGAS Evaluation Results (Day 11-12)
+
+Ran Faithfulness and Answer Relevancy metrics on 3 test questions using RAGAS 0.4.3,
+with Groq (openai/gpt-oss-120b) as the judge LLM and all-MiniLM-L6-v2 for embeddings.
+
+| Question                   | Answer Relevancy | Faithfulness |
+| -------------------------- | ---------------- | ------------ |
+| Operating margin FY2024-25 | 0.94             | 0.00\*       |
+| Employee count             | 0.75             | 0.00\*       |
+| Revenue growth FY2024-25   | 0.93             | 0.00\*       |
+
+\*Faithfulness scores are not reliable as measured - see methodology issue below.
+
+### Known issue: Context mismatch in faithfulness evaluation
+
+Faithfulness checks whether an answer's claims are supported by given retrieved contexts.
+In this evaluation, contexts were captured via a separate, independent call to
+search_documents AFTER the agent had already answered - not the actual context the
+agent used when generating its answer. Since the agent can choose between
+search_documents and web_search per question (and retrieval isn't perfectly
+deterministic - see Day 10 findings), the contexts evaluated often didn't match what
+the agent actually used, producing artificially low (0.00) faithfulness scores even
+on a verified-correct answer (operating margin: agent said 21.1%, ground truth is 21.1%,
+yet scored 0.00 faithfulness).
+
+Root cause: run_agent_query() doesn't expose which tool outputs it actually used.
+Proper fix: capture tool call results from the agent's message trace and pass those
+as retrieved_contexts, rather than re-running retrieval independently.
+
+This is a fixable evaluation-methodology issue, not evidence that faithfulness
+scoring itself failed - Answer Relevancy scores (0.75-0.94) are valid and indicate
+the agent's answers do address the questions asked.
+
+### Encountered and resolved 3 separate confirmed upstream bugs in RAGAS 0.4.3:
+
+1. Import crash: RAGAS's base.py unconditionally imports ChatVertexAI from
+   langchain_community, which was removed in langchain-community 0.4.2+.
+   Fix: pinned langchain-community<0.4.2 (documented community workaround).
+2. HuggingfaceEmbeddings (legacy) is abstract and cannot be instantiated -
+   missing async method implementations (confirmed GitHub issue #1806).
+3. ragas.metrics.collections requires the newer HuggingFaceEmbeddings (capital F)
+   class specifically, not the legacy lowercase-f version - undocumented in
+   most tutorials, found via direct API error message and official docs.
